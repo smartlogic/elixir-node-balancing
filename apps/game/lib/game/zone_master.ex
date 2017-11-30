@@ -40,7 +40,6 @@ defmodule Game.ZoneMaster do
     Logger.info("Node is online #{inspect(node_name)}")
 
     nodes = [node() | Node.list()]
-
     node_zones =
       nodes
       |> Enum.flat_map(fn (node) -> :ets.lookup(:zone_locations, node) end)
@@ -51,7 +50,6 @@ defmodule Game.ZoneMaster do
 
     zone_count = length(@zones)
     member_count = length(nodes)
-
     max_zones = round(Float.ceil(zone_count / member_count))
 
     redistribute_zones =
@@ -59,6 +57,7 @@ defmodule Game.ZoneMaster do
       |> Enum.reduce([], fn ({node_name, zones}, redistribute_zones) ->
         zones = Enum.slice(zones, max_zones..-1)
         GenServer.call({ZoneController, node_name}, {:stop_zones, zones})
+        Enum.each(zones, fn (zone_id) -> :ets.delete_object(@ets_table, {node_name, zone_id}) end)
         zones ++ redistribute_zones
       end)
 
@@ -87,9 +86,40 @@ defmodule Game.ZoneMaster do
   end
 
   def handle_info({:restart_zones, zones}, state) do
-    members = :pg2.get_members(:zone_controllers)
-    start_zones(zones, members)
+    nodes = [node() | Node.list()]
+    node_zones =
+      nodes
+      |> Enum.reduce(%{}, fn (node_name, nodes) ->
+        zone_ids =
+          :zone_locations
+          |> :ets.lookup(node_name)
+          |> Enum.map(&(elem(&1, 1)))
+
+        Map.put(nodes, node_name, zone_ids)
+      end)
+      |> Map.to_list()
+
+    zone_count = length(@zones)
+    node_count = length(nodes)
+    max_zones = round(Float.ceil(zone_count / node_count))
+
+    restart_zones(zones, node_zones, max_zones)
+
     {:noreply, state}
+  end
+
+  defp restart_zones(zones, [], _max_zones) do
+    raise "Something bad happened, ran out of nodes to place these zones #{inspect(zones)}"
+  end
+  defp restart_zones([], _nodes, _max_zones), do: :ok
+  defp restart_zones([zone | zones], [node | nodes], max_zones) do
+    case length(elem(node, 1)) >= max_zones do
+      true -> restart_zones([zone | zones], nodes, max_zones)
+      false ->
+        Logger.info "Starting zone on #{elem(node, 0)}"
+        start_zone(zone, {ZoneController, elem(node, 0)})
+        restart_zones(zones, [node | nodes], max_zones)
+    end
   end
 
   defp zones(zone_ids) do
@@ -106,8 +136,13 @@ defmodule Game.ZoneMaster do
     |> Enum.with_index()
     |> Enum.each(fn ({zone, index}) ->
       controller = Enum.at(members, rem(index, member_count))
-      node_name = ZoneController.start_zone(controller, zone)
-      :ets.insert(@ets_table, {node_name, zone.id})
+      start_zone(zone, controller)
     end)
+  end
+
+  def start_zone(zone, controller) do
+    node_name = ZoneController.start_zone(controller, zone)
+    :ets.insert(@ets_table, {node_name, zone.id})
+    :ets.insert(@ets_table, {controller, zone.id})
   end
 end
