@@ -3,16 +3,22 @@ defmodule World.Zone do
   require Logger
 
   def start_link(zone) do
-    GenServer.start_link(__MODULE__, zone)
+    GenServer.start_link(__MODULE__, zone, name: pid(zone.id))
+  end
+
+  defp pid(id), do: {:via, Registry, {World.ZoneRegistry, id}}
+
+  def shutdown(id) when is_integer(id) do
+    GenServer.call(pid(id), :shutdown)
   end
 
   def init(zone) do
     Logger.info("Zone started #{zone.id}")
-    #GenServer.cast(self(), :join)
     {:ok, zone}
   end
 
-  def handle_cast(:join, state) do
-    {:noreply, state}
+  def handle_call(:shutdown, _from, state) do
+    Logger.info("Stopping zone #{state.id}")
+    {:stop, :normal, :ok, state}
   end
 end

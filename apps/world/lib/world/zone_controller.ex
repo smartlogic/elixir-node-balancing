@@ -6,6 +6,8 @@ defmodule World.ZoneController do
   use GenServer
   require Logger
 
+  alias World.Zone
+
   def start_link(_) do
     GenServer.start_link(__MODULE__, nil, name: __MODULE__)
   end
@@ -26,5 +28,14 @@ defmodule World.ZoneController do
     World.Supervisor.start_child(zone)
 
     {:reply, node(), state}
+  end
+
+  def handle_call({:stop_zones, zones}, _from, state) do
+    Enum.each(zones, fn (zone_id) ->
+      Zone.shutdown(zone_id)
+      World.Supervisor.delete_child(zone_id)
+    end)
+
+    {:reply, :ok, state}
   end
 end

@@ -12,9 +12,11 @@ defmodule World.Supervisor do
   end
 
   def start_child(zone) do
-    child_spec = worker(Zone, [zone], id: zone.id, restart: :permanent)
+    child_spec = worker(Zone, [zone], id: zone.id, restart: :transient)
     Supervisor.start_child(__MODULE__, child_spec)
   end
+
+  def delete_child(zone_id), do: Supervisor.delete_child(__MODULE__, zone_id)
 
   def init(_) do
     supervise([], strategy: :one_for_one)
