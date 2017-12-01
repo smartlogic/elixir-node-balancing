@@ -13,7 +13,7 @@ After starting up the game node will contain 7 zone processes.
 
 ## World Nodes
 
-These nodes will contain
+These nodes will contain processes spawned by the game server (zones). A `ZoneController` is on each node locally registered that the `ZoneMaster` communicates with.
 
 ```bash
 cd apps/world
