@@ -8,7 +8,6 @@ defmodule Game.ZoneMaster do
 
   alias World.ZoneController
 
-  @ets_table :zone_locations
   @zones [%{id: 1}, %{id: 2}, %{id: 3}, %{id: 4}, %{id: 5}, %{id: 6}, %{id: 7}]
 
   def start_link(_) do
@@ -16,133 +15,75 @@ defmodule Game.ZoneMaster do
   end
 
   def init(_) do
-    :ets.new(@ets_table, [:bag, :protected, :named_table])
     :erlang.send_after(5000, self(), :start_zones)
     :ok = :net_kernel.monitor_nodes(true)
-
     {:ok, %{online: false}}
   end
 
   def handle_info(:start_zones, state) do
     Logger.info("Spinning up zones")
-
     :ok = :pg2.create(:zone_controllers)
-
-    members = :pg2.get_members(:zone_controllers)
-
-    @zones
-    |> start_zones(members)
-
+    :erlang.send_after(500, self(), :rebalance)
     {:noreply, %{state | online: true}}
   end
 
   def handle_info({:nodeup, node_name}, state = %{online: true}) do
     Logger.info("Node is online #{inspect(node_name)}")
-
-    nodes = [node() | Node.list()]
-    node_zones =
-      nodes
-      |> Enum.flat_map(fn (node) -> :ets.lookup(:zone_locations, node) end)
-      |> Enum.reduce(%{}, fn ({node_name, zone_id}, nodes) ->
-        zones = Map.get(nodes, node_name, [])
-        Map.put(nodes, node_name, [zone_id | zones])
-      end)
-
-    zone_count = length(@zones)
-    member_count = length(nodes)
-    max_zones = round(Float.ceil(zone_count / member_count))
-
-    redistribute_zones =
-      node_zones
-      |> Enum.reduce([], fn ({node_name, zones}, redistribute_zones) ->
-        zones = Enum.slice(zones, max_zones..-1)
-        GenServer.call({ZoneController, node_name}, {:stop_zones, zones})
-        Enum.each(zones, fn (zone_id) -> :ets.delete_object(@ets_table, {node_name, zone_id}) end)
-        zones ++ redistribute_zones
-      end)
-
-    zones =
-      redistribute_zones
-      |> zones()
-
-    :erlang.send_after(1000, self(), {:restart_zones, zones})
-
+    :erlang.send_after(500, self(), :rebalance)
     {:noreply, state}
   end
   def handle_info({:nodeup, _node}, state), do: {:noreply, state}
 
   def handle_info({:nodedown, node_name}, state) do
-    zones =
-      @ets_table
-      |> :ets.lookup(node_name)
-      |> Enum.map(&(elem(&1, 1)))
-      |> zones()
+    Logger.info("Node is down #{inspect(node_name)}")
+    :erlang.send_after(500, self(), :rebalance)
+    {:noreply, state}
+  end
 
-    :ets.delete(@ets_table, node_name)
+  def handle_info(:rebalance, state) do
+    members = :pg2.get_members(:zone_controllers)
 
-    :erlang.send_after(500, self(), {:restart_zones, zones})
+    members_with_zones = get_member_zones(members)
+
+    zone_count = length(@zones)
+    member_count = length(members)
+    max_zones = round(Float.ceil(zone_count / member_count))
+
+    Enum.each(members_with_zones, fn ({controller, zones}) ->
+      zones = Enum.slice(zones, max_zones..-1)
+      ZoneController.stop_zones(controller, zones)
+    end)
+
+    members_with_zones = get_member_zones(members)
+
+    @zones
+    |> Enum.reject(fn (zone) ->
+      Enum.any?(members_with_zones, fn ({_, zones}) ->
+        Enum.any?(zones, &(&1.id == zone.id))
+      end)
+    end)
+    |> restart_zones(members_with_zones, max_zones)
 
     {:noreply, state}
   end
 
-  def handle_info({:restart_zones, zones}, state) do
-    nodes = [node() | Node.list()]
-    node_zones =
-      nodes
-      |> Enum.reduce(%{}, fn (node_name, nodes) ->
-        zone_ids =
-          :zone_locations
-          |> :ets.lookup(node_name)
-          |> Enum.map(&(elem(&1, 1)))
-
-        Map.put(nodes, node_name, zone_ids)
-      end)
-      |> Map.to_list()
-
-    zone_count = length(@zones)
-    node_count = length(nodes)
-    max_zones = round(Float.ceil(zone_count / node_count))
-
-    restart_zones(zones, node_zones, max_zones)
-
-    {:noreply, state}
+  defp get_member_zones(members) do
+    Enum.map(members, fn (controller) ->
+      {controller, ZoneController.online_zones(controller)}
+    end)
   end
 
   defp restart_zones(zones, [], _max_zones) do
     raise "Something bad happened, ran out of nodes to place these zones #{inspect(zones)}"
   end
-  defp restart_zones([], _nodes, _max_zones), do: :ok
-  defp restart_zones([zone | zones], [node | nodes], max_zones) do
-    case length(elem(node, 1)) >= max_zones do
-      true -> restart_zones([zone | zones], nodes, max_zones)
+  defp restart_zones([], _controllers, _max_zones), do: :ok
+  defp restart_zones([zone | zones], [{controller, controller_zones} | controllers_with_zones], max_zones) do
+    case length(controller_zones) >= max_zones do
+      true -> restart_zones([zone | zones], controllers_with_zones, max_zones)
       false ->
-        Logger.info "Starting zone on #{elem(node, 0)}"
-        start_zone(zone, {ZoneController, elem(node, 0)})
-        restart_zones(zones, [node | nodes], max_zones)
+        Logger.info "Starting zone on #{inspect(controller)}"
+        ZoneController.start_zone(controller, zone)
+        restart_zones(zones, [{controller, controller_zones} | controllers_with_zones], max_zones)
     end
-  end
-
-  defp zones(zone_ids) do
-    @zones
-    |> Enum.filter(fn (zone) ->
-      zone.id in zone_ids
-    end)
-  end
-
-  defp start_zones(zones, members) do
-    member_count = length(members)
-
-    zones
-    |> Enum.with_index()
-    |> Enum.each(fn ({zone, index}) ->
-      controller = Enum.at(members, rem(index, member_count))
-      start_zone(zone, controller)
-    end)
-  end
-
-  def start_zone(zone, controller) do
-    node_name = ZoneController.start_zone(controller, zone)
-    :ets.insert(@ets_table, {node_name, zone.id})
-    :ets.insert(@ets_table, {controller, zone.id})
   end
 end
