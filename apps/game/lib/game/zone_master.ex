@@ -16,13 +16,15 @@ defmodule Game.ZoneMaster do
 
   def init(_) do
     :erlang.send_after(5000, self(), :start_zones)
+    :ok = :pg2.create(:zone_controllers)
+    :ok = :pg2.create(:zone_master)
+    :ok = :pg2.join(:zone_master, self())
     :ok = :net_kernel.monitor_nodes(true)
     {:ok, %{online: false}}
   end
 
   def handle_info(:start_zones, state) do
     Logger.info("Spinning up zones")
-    :ok = :pg2.create(:zone_controllers)
     :erlang.send_after(500, self(), :rebalance)
     {:noreply, %{state | online: true}}
   end
@@ -42,7 +44,6 @@ defmodule Game.ZoneMaster do
 
   def handle_info(:rebalance, state) do
     members = :pg2.get_members(:zone_controllers)
-
     members_with_zones = get_member_zones(members)
 
     zone_count = length(@zones)
@@ -83,6 +84,7 @@ defmodule Game.ZoneMaster do
       false ->
         Logger.info "Starting zone on #{inspect(controller)}"
         ZoneController.start_zone(controller, zone)
+        controller_zones = [zone | controller_zones]
         restart_zones(zones, [{controller, controller_zones} | controllers_with_zones], max_zones)
     end
   end
