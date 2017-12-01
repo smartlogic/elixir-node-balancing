@@ -1,4 +1,8 @@
 defmodule World.Zone do
+  @moduledoc """
+  A simple GenServer to spin up and down
+  """
+
   use GenServer
   require Logger
 
